@@ -1,0 +1,1354 @@
+diff -ruN a/CHANGELOG.md b/CHANGELOG.md
+--- a/CHANGELOG.md	1970-01-01 00:00:00.000000000 +0000
++++ b/CHANGELOG.md	2026-07-30 14:10:22.394476681 +0000
+@@ -0,0 +1,22 @@
++# Changelog
++
++## 0.2.0 - corrected-paper alignment
++
++### Changed
++
++- Implemented corrected equation (5) with `W_L1` as a vector of length `d_key` and `b_L1` as a vector of length `w + p`.
++- Kept `P = Q K.T` unscaled in stage 1 and moved `1/sqrt(d_key)` scaling into stage 2.
++- Updated NumPy parameter evaluation, parameter export, and the exact CVXPY CCP formulation.
++- Added `p` and `logits` as distinct model intermediates.
++- Added automatic migration for version-0.1 checkpoints and `.npz` parameter files.
++- Added command-line options for `past_window`, `horizon`, and `d_key` in `train_demo.py`.
++- Added `src` to pytest's configured Python path.
++
++### Fixed
++
++- Included the final valid sliding window in `make_windows`.
++- Improved the dimension guard for the exact simplex-enumeration demo.
++
++### Validation
++
++- Added tests for corrected readout dimensions, unscaled/scaled attention variables, DC-bound tightness, and old-checkpoint migration.
+diff -ruN a/PAPER_CONSISTENCY.md b/PAPER_CONSISTENCY.md
+--- a/PAPER_CONSISTENCY.md	1970-01-01 00:00:00.000000000 +0000
++++ b/PAPER_CONSISTENCY.md	2026-07-30 14:08:24.406473593 +0000
+@@ -0,0 +1,165 @@
++# Consistency audit against the corrected paper
++
++This note records the review of starter version 0.1 against the corrected six-page manuscript and the changes made in version 0.2.
++
++## Summary
++
++Two material inconsistencies required code changes:
++
++1. The first linear-transformation bias in corrected equation (5) is a vector in `R^(w+p)`, not a scalar shared by all sequence positions.
++2. Corrected stages 1 and 2 distinguish the unscaled matrix `P = Q K.T` from the softmax argument `P / sqrt(d_key)`.
++
++The stage-3 code was already using the corrected entrywise interpretation. The softmax lower-bound code was already summing over `j != i`.
++
++## Equation-by-equation audit
++
++### Equations (2)-(4): embedding and self-attention
++
++The existing embedding, query, key, and value calculations were dimensionally consistent:
++
++```text
++Z1_past   = X_p @ W_EM1.T + b_EM1
++Z1_future = U   @ W_EM2.T + b_EM2
++Q = Z1 @ W_Q.T + b_Q
++K = Z1 @ W_K.T + b_K
++V = Z1 @ W_V.T + b_V
++```
++
++No architectural change was needed here.
++
++The intermediate representation now stores both:
++
++```text
++P      = Q @ K.T
++logits = P / sqrt(d_key)
++R      = softmax(logits)
++Z2     = R @ V
++```
++
++This makes the exported variables agree with the corrected notation.
++
++### Equation (5): linear transformation
++
++The corrected paper specifies
++
++```text
++Y = W_L2 ((Z1 + Z2) W_L1 + b_L1) + b_L2
++```
++
++with
++
++```text
++W_L1 in R^d_key
++b_L1 in R^(w+p)
++W_L2 in R^(p x (w+p))
++b_L2 in R^p
++```
++
++Starter version 0.1 used `nn.Linear(d_key, 1)`, whose bias is one scalar shared across sequence positions. Version 0.2 replaces it with `SequenceLinearTransformation`, which has:
++
++```text
++readout1.weight.shape == (d_key,)
++readout1.bias.shape   == (w + p,)
++```
++
++The NumPy export and exact CCP output expression were changed accordingly.
++
++For `n_outputs > 1`, the code retains the same hidden vector of length `w+p` and generalizes `W_L2` to shape `(p*n_outputs, w+p)`.
++
++### Equations (7)-(12): stage-1 DC bounds
++
++The corrected paper defines
++
++```text
++P = Q K.T
++```
++
++before attention scaling. Version 0.1 divided the stage-1 values and bounds by `sqrt(d_key)`. Version 0.2 removes that division. Therefore:
++
++```text
++stage1_bounds(...)
++```
++
++returns lower and upper bounds on unscaled `P`.
++
++The optional `d_key` argument is temporarily accepted for source compatibility but is not used.
++
++### Equations (13)-(16): stage-2 softmax bounds
++
++The corrected paper applies softmax to
++
++```text
++P / sqrt(d_key).
++```
++
++Version 0.2 changes both NumPy and CVXPY functions so they accept the unscaled stage-1 matrix `P` and apply the scaling internally:
++
++```text
++stage2_bounds(P, P_k, d_key)
++```
++
++The stage-1 simplex therefore contains the same `P` used in corrected Algorithm 1.
++
++The lower-bound summation was already implemented as `j != i`; no change was needed for that correction.
++
++### Equations (17)-(18): stage-3 bounds
++
++The corrected manuscript gives an entrywise DC decomposition of
++
++```text
++S[i, j] = R[i, :] @ V[:, j].
++```
++
++Version 0.1 already implemented this entrywise form in NumPy and CVXPY. The implementation was retained and its documentation updated.
++
++### Algorithm 1 and simplex propagation
++
++The code already vectorized each matrix when constructing
++
++```text
++C(alpha, beta) = {X: -alpha <= vec(X), 1.T vec(X) <= beta}.
++```
++
++The corrected distinction between `P` and `P/sqrt(d_key)` is now respected when propagating the first simplex into the softmax bounds.
++
++The corrected increment indexing is already represented by
++
++```text
++Delta U[0] = U[0] - previous_u
++Delta U[j] = U[j] - U[j-1],  j > 0.
++```
++
++The exact reference adds input and rate bounds as a practical MPC extension; these are not essential to the paper's displayed Algorithm 1.
++
++## Independent correction found during the audit
++
++`make_windows` omitted the final valid sliding window. The number of windows is now
++
++```text
++T - w - p + 1
++```
++
++rather than `T - w - p`.
++
++## Checkpoint migration
++
++Version-0.1 checkpoints remain loadable. The loader transforms
++
++```text
++readout1.weight: (1, d_key) -> (d_key,)
++readout1.bias:   (1,)       -> repeat scalar to (w+p,)
++```
++
++This gives exactly the same predictions as the old architecture. New models should be retrained to learn the corrected position-dependent `b_L1`.
++
++## Validation performed
++
++The test suite checks that:
++
++- PyTorch and exported NumPy predictions agree;
++- `W_L1`, `b_L1`, and `W_L2` have corrected dimensions;
++- `P = Q K.T` is unscaled and `logits = P/sqrt(d_key)`;
++- all three DC bounds contain the true mapping and are tight at the linearization point;
++- an old checkpoint is migrated without changing its predictions;
++- generic benchmark-system windows include the final valid sample;
++- PIQP QP assembly remains symmetric positive definite and dimensionally valid.
+diff -ruN a/PROJECT_GUIDE.md b/PROJECT_GUIDE.md
+--- a/PROJECT_GUIDE.md	2026-07-29 10:17:42.000000000 +0000
++++ b/PROJECT_GUIDE.md	2026-07-30 14:08:45.438474143 +0000
+@@ -1,4 +1,4 @@
+-# Project guide: reproducing TFE-based MPC
++# Project guide: reproducing corrected TFE-based MPC
+ 
+ ## 1. What to reproduce first
+ 
+@@ -6,7 +6,7 @@
+ 
+ 1. **Data and scaling**: trajectories, sliding windows, and fixed normalization statistics.
+ 2. **TFE prediction**: a deliberately small, explicit single-head network with no layer normalization.
+-3. **DC bound verification**: numerical tests showing lower <= true mapping <= upper and equality at the linearization point for P, R, and S.
++3. **DC-bound verification**: numerical tests showing `lower <= true mapping <= upper` and equality at the linearization point for `P`, `R`, and `S`.
+ 4. **Online optimization**: first the small exact conic reference, then the fast PIQP approximation.
+ 
+ Do not begin with a closed-loop experiment. First make the exported NumPy model match PyTorch to numerical tolerance, then make every DC bound pass randomized tests.
+@@ -17,6 +17,8 @@
+ 
+ Use PyTorch. Avoid `nn.TransformerEncoder` and `nn.MultiheadAttention` initially because their fused parameters, masks, dropout options, and implementation details make the paper-to-code mapping less transparent. The explicit layers in `model.py` expose exactly the matrices needed by the optimizer.
+ 
++The corrected first readout is not an ordinary `nn.Linear(d_key, 1)` because its bias has one component per sequence position. `SequenceLinearTransformation` implements this directly.
++
+ ### Exact Algorithm 1 baseline
+ 
+ Use CVXPY as the modeling layer and Clarabel as the first open-source solver. The softmax bounds are exponential-cone representable, while the quadratic inequalities and robust tracking epigraph are second-order-cone representable. SCS is a useful fallback for debugging but will generally be less accurate.
+@@ -29,68 +31,104 @@
+ 
+ Use NumPy/SciPy for matrix assembly, pytest for bound and shape tests, and dataclasses for immutable model/controller configuration. Save both a PyTorch checkpoint and an `.npz` export.
+ 
+-## 3. Matrix mapping
+-
+-The exported names map to the paper as follows:
+-
+-| Code | Paper |
+-|---|---|
+-| `w_em1`, `b_em1` | W_EM1, b_EM1 |
+-| `w_em2`, `b_em2` | W_EM2, b_EM2 |
+-| `w_q`, `b_q` | W_Q, b_Q |
+-| `w_k`, `b_k` | W_K, b_K |
+-| `w_v`, `b_v` | W_V, b_V |
+-| `w_l1`, `b_l1` | W_L1, b_L1 |
+-| `w_l2`, `b_l2` | W_L2, b_L2 |
+-
+-PyTorch `nn.Linear(in_features, out_features)` stores a matrix with shape `(out_features, in_features)` and evaluates `x @ weight.T + bias`, which is the same convention used by the implementation.
+-
+-## 4. Exact conic CCP flow
+-
+-At iteration k:
+-
+-1. Evaluate the exported model at U_k to obtain Z1_k, Q_k, K_k, P_k, R_k, V_k, and S_k.
+-2. Make physical future controls U the primary decision variable and normalize them affinely inside the optimization model.
+-3. Construct Z1(U), Q(U), K(U), and V(U) as affine CVXPY expressions.
+-4. Construct entrywise stage-1 lower and upper DC bounds.
+-5. Build C(alpha1, beta1), enumerate its vertices, and impose stage-2 softmax bounds at those vertices.
+-6. Build C(alpha2, beta2), enumerate its vertices, and impose stage-3 entrywise product bounds.
+-7. Build C(alpha3, beta3), enumerate its vertices, and impose a worst-case tracking epigraph at each output vertex.
+-8. Add input and input-rate constraints, solve, and update U_k.
++## 3. Corrected matrix mapping
+ 
+-This is intentionally a small-scale reference. With L = w + p, stage 2 already uses L^2 + 1 simplex vertices. Use tiny dimensions to validate mathematics before attempting performance engineering.
+-
+-## 5. PIQP QP flow
+-
+-For the current future input vector U_k, compute the physical-output Jacobian J_k by automatic differentiation:
+-
+-`Y(U) approximately Y(U_k) + J_k (U - U_k)`.
++| Code | Paper | Shape in SISO paper |
++|---|---|---|
++| `w_em1`, `b_em1` | `W_EM1`, `b_EM1` | `(d_key, 2)`, `(d_key,)` |
++| `w_em2`, `b_em2` | `W_EM2`, `b_EM2` | `(d_key, 1)`, `(d_key,)` |
++| `w_q`, `b_q` | `W_Q`, `b_Q` | `(d_key, d_key)`, `(d_key,)` |
++| `w_k`, `b_k` | `W_K`, `b_K` | `(d_key, d_key)`, `(d_key,)` |
++| `w_v`, `b_v` | `W_V`, `b_V` | `(d_key, d_key)`, `(d_key,)` |
++| `w_l1` | `W_L1` | `(d_key,)` |
++| `b_l1` | `b_L1` | `(w+p,)` |
++| `w_l2`, `b_l2` | `W_L2`, `b_L2` | `(p, w+p)`, `(p,)` |
++
++PyTorch `nn.Linear(in_features, out_features)` stores a matrix with shape `(out_features, in_features)` and evaluates `x @ weight.T + bias`. The custom first readout instead evaluates
++
++```text
++h = values @ readout1.weight + readout1.bias
++```
++
++so that its tensors match corrected equation (5) directly.
++
++## 4. Corrected forward map
++
++For sequence length `L = w + p`:
++
++```text
++Z1 = G(U)                         shape (L, d_key)
++Q  = Z1 W_Q.T + b_Q              shape (L, d_key)
++K  = Z1 W_K.T + b_K              shape (L, d_key)
++V  = Z1 W_V.T + b_V              shape (L, d_key)
++P  = Q K.T                       shape (L, L)
++R  = softmax(P / sqrt(d_key))    shape (L, L)
++S  = R V                         shape (L, d_key)
++h  = (Z1 + S) W_L1 + b_L1       shape (L,)
++Y  = W_L2 h + b_L2               shape (p,) in SISO
++```
++
++The code exposes both `p` and `logits` in model intermediates. This avoids accidentally applying the attention scale in stage 1.
++
++## 5. Exact conic CCP flow
++
++At iteration `k`:
++
++1. Evaluate the exported model at `U_k` to obtain `Z1_k`, `Q_k`, `K_k`, unscaled `P_k`, `R_k`, `V_k`, and `S_k`.
++2. Make physical future controls `U` the primary decision variable and normalize them affinely inside the optimization model.
++3. Construct `Z1(U)`, `Q(U)`, `K(U)`, and `V(U)` as affine CVXPY expressions.
++4. Construct entrywise stage-1 bounds on unscaled `P = Q K.T`.
++5. Build `C(alpha1, beta1)`, enumerate its vertices, divide every vertex by `sqrt(d_key)` inside the stage-2 softmax bounds, and construct `C(alpha2, beta2)`.
++6. Enumerate the stage-2 simplex vertices and impose the corrected entrywise stage-3 bounds for `S = R V`.
++7. Build `C(alpha3, beta3)`, enumerate its vertices, and impose a worst-case tracking epigraph at each output vertex using corrected equation (5).
++8. Add input and input-rate constraints, solve, and update `U_k`.
++
++This is intentionally a small-scale reference. With `L = w + p`, stage 2 already uses `L^2 + 1` simplex vertices. Use tiny dimensions to validate mathematics before attempting performance engineering.
++
++## 6. PIQP QP flow
++
++For the current future input vector `U_k`, compute the physical-output Jacobian `J_k` by automatic differentiation:
++
++```text
++Y(U) approximately Y(U_k) + J_k (U - U_k).
++```
+ 
+ The included code minimizes
+ 
+-`||Y_affine(U) - Y_ref||_Q^2 + lambda ||Delta U||^2 + rho ||U-U_k||^2`
++```text
++||Y_affine(U) - Y_ref||_Q^2
+++ lambda ||Delta U||^2
+++ rho ||U-U_k||^2
++```
+ 
+ subject to input bounds, rate bounds, and a box trust region. This is converted explicitly to PIQP's
+ 
+-`0.5 U.T P U + c.T U`
++```text
++0.5 U.T P U + c.T U
++```
+ 
+ form. The difference matrix uses time-major flattening, so a MIMO sequence is `[u_0, u_1, ..., u_{p-1}]` with each `u_j` containing all input channels.
+ 
+-## 6. Validation milestones
++The PIQP path automatically uses the corrected predictor architecture because it differentiates the complete PyTorch model. No QP-assembly formula changed in version 0.2.
+ 
+-1. `test_model_export.py` passes: exported and PyTorch predictions agree.
++## 7. Validation milestones
++
++1. `test_model_export.py` passes: corrected tensor dimensions are present and exported and PyTorch predictions agree.
+ 2. `test_dc_bounds.py` passes over many random seeds and perturbation magnitudes.
+ 3. Train a small model with `w=2, p=2, d_key=2` and solve one exact conic subproblem.
+ 4. Compare exact CCP and PIQP-SQP from the same initial sequence on that small model.
+ 5. Add closed-loop simulation and record prediction error, tracking RMSE, solve time, iteration count, and constraint violation.
+ 6. Only then increase to the paper's `w=8, p=20` architecture.
+ 
+-## 7. Research questions to log explicitly
++## 8. Checkpoints from starter version 0.1
++
++The loader upgrades old tensor shapes and preserves their predictions. Nevertheless, retrain models for new experiments because the corrected `b_L1` has `w+p` independently trainable components, whereas the old checkpoint contains only one shared scalar.
++
++## 9. Remaining implementation questions
+ 
+-- Does the paper implementation include the `1/sqrt(d_key)` factor in its DC bounds?
+-- Is the output head orientation exactly the dimensionally consistent implementation used here?
+-- Are equations (19)-(20) intended entrywise, or is a different matrix-valued ordering used?
+-- How are the robust simplex constraints evaluated efficiently at the reported horizon?
+-- Are input/output constraints omitted from the short paper but present in the authors' experiments?
++The corrected paper resolves the previous dimensional ambiguities. Questions that remain relevant for a full reproduction include:
+ 
+-These are suitable questions for the authors before trying to reproduce the reported timing numbers.
++- How are the simplex vertex constraints evaluated efficiently at the reported horizon `p=20`?
++- What exact normalization, training-data excitation, optimizer settings, and stopping criteria were used for the reported BFR values?
++- Were additional input/output constraints used in the closed-loop experiments?
++- How was the predictor recursively composed for MPC horizons `N > p` inside the online CCP formulation?
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-07-29 10:17:06.000000000 +0000
++++ b/README.md	2026-07-30 14:09:59.786476089 +0000
+@@ -1,6 +1,26 @@
+ # TFE-CCP MPC starter
+ 
+-This repository is a research starter for the transformer-encoder (TFE) model predictive control method in the uploaded paper.
++This repository is a research starter for the corrected version of **Successive Convex Optimization for Transformer Encoder Model Predictive Control**.
++
++## Paper-consistency status
++
++Version 0.2 aligns the model and the exact conic reference implementation with the corrected equations:
++
++- `P = Q @ K.T` is kept **unscaled** in self-attention stage 1.
++- The factor `1 / sqrt(d_key)` is applied when stage 2 evaluates `R = softmax(P / sqrt(d_key))`.
++- The linear transformation implements corrected equation (5):
++
++  ```text
++  h = (Z1 + Z2) @ W_L1 + b_L1
++  Y = W_L2 @ h + b_L2
++  ```
++
++  with `W_L1.shape == (d_key,)` and `b_L1.shape == (w + p,)`.
++- Stage 3 uses the corrected entrywise products `S[i, j] = R[i, :] @ V[:, j]`.
++- The softmax lower bound uses the corrected summation over `j != i`.
++- The matrix simplexes are represented by vectorizing `P`, `R`, and `S`, as specified below Algorithm 1.
++
++See `PAPER_CONSISTENCY.md` for the full audit and migration notes.
+ 
+ ## Important solver point
+ 
+@@ -12,43 +32,61 @@
+ 
+ PIQP solves QPs with a quadratic objective and linear equalities/inequalities. It therefore cannot solve the paper's exact subproblem without an additional approximation. This project keeps two backends separate:
+ 
+-1. `ExactConicCCP`: a direct, small-scale reference implementation of Algorithm 1 using CVXPY and Clarabel (or SCS). This is the correctness baseline.
+-2. `PiqpSequentialController`: a PIQP-compatible sequential QP using the exact trained TFE and its Jacobian at each iterate, input/rate constraints, and a trust region. This is useful for fast experiments, but it is not mathematically identical to Algorithm 1 and does not inherit the paper's DC/simplex guarantees.
++1. `ExactConicCCP`: a direct, small-scale reference implementation of corrected Algorithm 1 using CVXPY and Clarabel (or SCS). This is the mathematical baseline.
++2. `PiqpSequentialController`: a PIQP-compatible sequential QP using the exact trained TFE and its Jacobian at each iterate, input/rate constraints, and a trust region. This is useful for fast experiments, but it is not Algorithm 1 and does not inherit the paper's DC/simplex guarantees.
+ 
+-## Recommended workflow
++## Recommended setup
+ 
+ ```bash
+ python -m venv .venv
+ source .venv/bin/activate          # Windows: .venv\Scripts\activate
+-pip install -e ".[optimization,dev]"
+-pytest
++python -m pip install --upgrade pip
++python -m pip install -e ".[optimization,dev]"
++python -m pytest
++```
++
++The pytest configuration also adds `src` to the test path, so tests can be collected from a clean checkout. An editable installation is still recommended for scripts, PyCharm, and notebooks.
++
++Train and run the PIQP approximation:
++
++```bash
+ python scripts/train_demo.py --system nonlinear_spring --epochs 80
+ python scripts/run_piqp_demo.py --checkpoint artifacts/model.pt
+ ```
+ 
+-Use `scripts/run_exact_small.py` only with deliberately small values of `w`, `p`, and `d_key`. The vertex representation of the paper's propagated simplexes grows rapidly.
++For the exact reference, first train a deliberately small model:
++
++```bash
++python scripts/train_demo.py --system nonlinear_spring --length 1200 --epochs 40 \
++  --past-window 2 --horizon 2 --d-key 2 --output artifacts/small_model.pt
++python scripts/run_exact_small.py --checkpoint artifacts/small_model.pt
++```
++
++The vertex representation of the propagated simplexes grows rapidly, so `run_exact_small.py` is intentionally restricted to small dimensions.
+ 
+ ## Package layout
+ 
+-- `model.py`: explicit single-head TFE matching the paper, without layer normalization.
++- `model.py`: explicit single-head TFE matching corrected equations (2)-(5), without layer normalization.
+ - `data.py`: generic trajectory windows and train/validation splitting.
+ - `systems/`: plant protocol plus coupled-tank and nonlinear spring benchmarks.
+ - `training.py`: PyTorch training and checkpointing.
+ - `export.py`: extraction of every TFE matrix/bias and scaling parameter to NumPy.
+-- `dc_bounds.py`: NumPy implementations of the stage-1, stage-2, and stage-3 bounds for testing.
+-- `optimization/exact_ccp.py`: CVXPY/Clarabel reference formulation of the paper's simplex-propagating CCP.
++- `dc_bounds.py`: NumPy implementations of corrected stage-1, stage-2, and stage-3 bounds.
++- `optimization/exact_ccp.py`: CVXPY/Clarabel reference formulation of corrected Algorithm 1.
+ - `optimization/piqp_sqp.py`: direct PIQP QP assembly and sequential-QP controller.
++- `PAPER_CONSISTENCY.md`: equation-by-equation audit against the corrected manuscript.
+ 
+-## Paper interpretation choices
++## Existing version-0.1 checkpoints
+ 
+-The implementation makes three explicit choices where the short paper is dimensionally ambiguous:
++`load_checkpoint` and `load_parameters` migrate the first starter version automatically:
+ 
+-1. The attention score includes the standard `1 / sqrt(d_key)` factor throughout the DC bounds.
+-2. The output layer is implemented as `y = W_L2 @ h + b_L2`, where `h = (Z1 + S) @ W_L1.T + b_L1`. This is the dimensionally consistent reading of equation (5).
+-3. Stage 3 is bounded entry by entry: `S[i,a] = R[i,:] @ V[:,a]`. The displayed matrix/Frobenius notation in equations (19)-(20) is interpreted as the collection of these scalar DC decompositions.
++- old `W_L1` arrays with shape `(1, d_key)` are squeezed to `(d_key,)`;
++- the old shared scalar `b_L1` is repeated over all `w + p` positions.
+ 
+-Keep these choices documented when comparing results with code from the authors.
++This preserves the old predictor numerically. It does **not** add the extra degrees of freedom of the corrected architecture, so retraining is recommended for paper-reproduction experiments.
+ 
+ ## Extending to another system
+ 
+-Implement the `DynamicalSystem` protocol in `systems/base.py`. The TFE supports arbitrary input and output dimensions. The exact CCP implementation is most practical for small SISO examples; the PIQP sequential-QP backend scales more naturally to larger horizons and MIMO examples.
++Implement the `DynamicalSystem` protocol in `systems/base.py`. The TFE supports arbitrary input and output dimensions. The corrected paper is SISO, while the code extends `W_L2` and `b_L2` to produce `p * n_outputs` values for MIMO benchmarks.
++
++The exact CCP implementation is practical only for very small examples. The PIQP sequential-QP backend scales more naturally to larger horizons and MIMO systems.
+diff -ruN a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml	2026-07-29 10:17:06.000000000 +0000
++++ b/pyproject.toml	2026-07-30 14:08:45.866474154 +0000
+@@ -4,8 +4,8 @@
+ 
+ [project]
+ name = "tfe-ccp-starter"
+-version = "0.1.0"
+-description = "Research starter for transformer-encoder MPC with CCP and PIQP-compatible SQP"
++version = "0.2.0"
++description = "Research starter for corrected transformer-encoder MPC with CCP and PIQP-compatible SQP"
+ readme = "README.md"
+ requires-python = ">=3.10"
+ dependencies = [
+@@ -30,3 +30,4 @@
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
+ addopts = "-q"
++pythonpath = ["src"]
+diff -ruN a/scripts/run_exact_small.py b/scripts/run_exact_small.py
+--- a/scripts/run_exact_small.py	2026-07-29 10:17:06.000000000 +0000
++++ b/scripts/run_exact_small.py	2026-07-30 14:09:52.698475903 +0000
+@@ -15,8 +15,12 @@
+     args = parser.parse_args()
+     model, scalers = load_checkpoint(args.checkpoint)
+     cfg = model.config
+-    if cfg.sequence_length**2 + 1 > 200:
+-        raise SystemExit("Use a checkpoint trained with small w and p for the exact vertex-enumeration demo.")
++    largest_simplex = max(cfg.sequence_length**2 + 1, cfg.sequence_length * cfg.d_key + 1)
++    if largest_simplex > 200:
++        raise SystemExit(
++            "Use a checkpoint trained with small w, p, and d_key for the exact "
++            "vertex-enumeration demo."
++        )
+ 
+     solver = ExactConicCCP(
+         extract_parameters(model, scalers),
+diff -ruN a/scripts/train_demo.py b/scripts/train_demo.py
+--- a/scripts/train_demo.py	2026-07-29 10:17:06.000000000 +0000
++++ b/scripts/train_demo.py	2026-07-30 14:09:52.242475891 +0000
+@@ -15,23 +15,44 @@
+     parser.add_argument("--system", choices=("coupled_tanks", "nonlinear_spring"), default="nonlinear_spring")
+     parser.add_argument("--epochs", type=int, default=80)
+     parser.add_argument("--length", type=int, default=6000)
++    parser.add_argument("--past-window", type=int, default=8)
++    parser.add_argument("--horizon", type=int, default=20)
++    parser.add_argument("--d-key", type=int, default=4)
++    parser.add_argument("--batch-size", type=int, default=128)
++    parser.add_argument("--patience", type=int, default=12)
++    parser.add_argument("--seed", type=int, default=1)
+     parser.add_argument("--output", type=Path, default=Path("artifacts/model.pt"))
+     args = parser.parse_args()
+ 
+     if args.system == "coupled_tanks":
+-        system = CoupledTanks()
+-        controls = piecewise_constant_controls(args.length, 1, 0.0, 10.0, hold=10, seed=1)
++        system = CoupledTanks(seed=args.seed)
++        controls = piecewise_constant_controls(
++            args.length, 1, 0.0, 10.0, hold=10, seed=args.seed
++        )
+     else:
+         system = NonlinearSpringMass()
+-        controls = piecewise_constant_controls(args.length, 1, -1.5, 1.5, hold=12, seed=1)
++        controls = piecewise_constant_controls(
++            args.length, 1, -1.5, 1.5, hold=12, seed=args.seed
++        )
+ 
+-    config = TFEConfig(past_window=8, horizon=20, n_inputs=system.n_inputs, n_outputs=system.n_outputs, d_key=4)
++    config = TFEConfig(
++        past_window=args.past_window,
++        horizon=args.horizon,
++        n_inputs=system.n_inputs,
++        n_outputs=system.n_outputs,
++        d_key=args.d_key,
++    )
+     trajectory = simulate(system, controls)
+     windows = make_windows(trajectory, config.past_window, config.horizon)
+     model, scalers, history = train_model(
+         config,
+         windows,
+-        TrainingConfig(epochs=args.epochs, batch_size=128, patience=12),
++        TrainingConfig(
++            epochs=args.epochs,
++            batch_size=args.batch_size,
++            patience=args.patience,
++            seed=args.seed,
++        ),
+     )
+     save_checkpoint(args.output, model, scalers, history)
+     save_parameters(args.output.with_suffix(".npz"), extract_parameters(model, scalers))
+diff -ruN a/src/tfe_ccp/data.py b/src/tfe_ccp/data.py
+--- a/src/tfe_ccp/data.py	2026-07-29 10:17:06.000000000 +0000
++++ b/src/tfe_ccp/data.py	2026-07-30 14:06:40.062470862 +0000
+@@ -28,7 +28,7 @@
+     u, y = trajectory.u, trajectory.y
+     if len(u) != len(y):
+         raise ValueError("Trajectory u and y lengths must match.")
+-    samples = len(u) - past_window - horizon
++    samples = len(u) - past_window - horizon + 1
+     if samples <= 0:
+         raise ValueError("Trajectory is too short for the selected windows.")
+ 
+diff -ruN a/src/tfe_ccp/dc_bounds.py b/src/tfe_ccp/dc_bounds.py
+--- a/src/tfe_ccp/dc_bounds.py	2026-07-29 10:17:06.000000000 +0000
++++ b/src/tfe_ccp/dc_bounds.py	2026-07-30 14:06:09.798470070 +0000
+@@ -15,8 +15,10 @@
+     k: np.ndarray
+     v: np.ndarray
+     p: np.ndarray
++    logits: np.ndarray
+     r: np.ndarray
+     s: np.ndarray
++    h: np.ndarray
+     y: np.ndarray
+ 
+ 
+@@ -32,6 +34,12 @@
+     past_y: np.ndarray,
+     future_u: np.ndarray,
+ ) -> ForwardIntermediates:
++    """Evaluate the exported model in physical units.
++
++    ``p`` is the unscaled matrix P = Q K.T in corrected equation (7), while
++    ``logits`` is P / sqrt(d_key), the argument of softmax in equation (3).
++    """
++
+     config = params.config
+     past_u_n = (np.asarray(past_u) - params.u_mean) / params.u_scale
+     past_y_n = (np.asarray(past_y) - params.y_mean) / params.y_scale
+@@ -43,13 +51,14 @@
+     q = z1 @ params.w_q.T + params.b_q
+     k = z1 @ params.w_k.T + params.b_k
+     v = z1 @ params.w_v.T + params.b_v
+-    p = q @ k.T / math.sqrt(config.d_key)
+-    r = softmax_rows(p)
++    p = q @ k.T
++    logits = p / math.sqrt(config.d_key)
++    r = softmax_rows(logits)
+     s = r @ v
+-    h = ((z1 + s) @ params.w_l1.T + params.b_l1).reshape(-1)
++    h = (z1 + s) @ params.w_l1 + params.b_l1
+     y_n = (params.w_l2 @ h + params.b_l2).reshape(config.horizon, config.n_outputs)
+     y = y_n * params.y_scale + params.y_mean
+-    return ForwardIntermediates(z1, q, k, v, p, r, s, y)
++    return ForwardIntermediates(z1, q, k, v, p, logits, r, s, h, y)
+ 
+ 
+ def stage1_bounds(
+@@ -57,12 +66,20 @@
+     k: np.ndarray,
+     q0: np.ndarray,
+     k0: np.ndarray,
+-    d_key: int,
++    d_key: int | None = None,
+ ) -> tuple[np.ndarray, np.ndarray]:
++    """Bounds for P = Q K.T from corrected equations (11)-(12).
++
++    ``d_key`` is accepted only for source compatibility with version 0.1 and
++    is intentionally not used: the corrected paper defines P before the
++    ``1/sqrt(d_key)`` attention scaling.
++    """
++
++    if d_key is not None and d_key <= 0:
++        raise ValueError("d_key must be positive when supplied.")
+     length = q.shape[0]
+     lower = np.empty((length, length), dtype=np.float64)
+     upper = np.empty((length, length), dtype=np.float64)
+-    scale = math.sqrt(d_key)
+     for i in range(length):
+         for j in range(length):
+             plus = q[i] + k[j]
+@@ -73,21 +90,35 @@
+             p2 = 0.25 * minus @ minus
+             p1 = 0.25 * plus @ plus
+             p2_linear = 0.25 * minus0 @ minus0 + 0.5 * minus0 @ (minus - minus0)
+-            lower[i, j] = (p1_linear - p2) / scale
+-            upper[i, j] = (p1 - p2_linear) / scale
++            lower[i, j] = p1_linear - p2
++            upper[i, j] = p1 - p2_linear
+     return lower, upper
+ 
+ 
+-def stage2_bounds(p: np.ndarray, p0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+-    length = p.shape[0]
+-    r0 = softmax_rows(p0)
+-    lower = np.empty_like(p, dtype=np.float64)
+-    upper = np.empty_like(p, dtype=np.float64)
++def stage2_bounds(
++    p: np.ndarray,
++    p0: np.ndarray,
++    d_key: int,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Bounds for R = softmax(P / sqrt(d_key)), equations (14)-(15).
++
++    Both ``p`` and ``p0`` are the unscaled P = Q K.T matrices used by the
++    stage-1 simplex in Algorithm 1. Scaling is applied internally here.
++    """
++
++    if d_key <= 0:
++        raise ValueError("d_key must be positive.")
++    p_scaled = np.asarray(p, dtype=np.float64) / math.sqrt(d_key)
++    p0_scaled = np.asarray(p0, dtype=np.float64) / math.sqrt(d_key)
++    length = p_scaled.shape[0]
++    r0 = softmax_rows(p0_scaled)
++    lower = np.empty_like(p_scaled, dtype=np.float64)
++    upper = np.empty_like(p_scaled, dtype=np.float64)
+     for row in range(length):
+-        maximum = np.max(p0[row])
+-        lse0 = maximum + np.log(np.exp(p0[row] - maximum).sum())
+-        tangent_lse = lse0 + r0[row] @ (p[row] - p0[row])
+-        exp_terms = np.exp(p[row] - tangent_lse)
++        maximum = np.max(p0_scaled[row])
++        lse0 = maximum + np.log(np.exp(p0_scaled[row] - maximum).sum())
++        tangent_lse = lse0 + r0[row] @ (p_scaled[row] - p0_scaled[row])
++        exp_terms = np.exp(p_scaled[row] - tangent_lse)
+         upper[row] = exp_terms
+         for column in range(length):
+             lower[row, column] = 1.0 - (exp_terms.sum() - exp_terms[column])
+@@ -100,6 +131,8 @@
+     r0: np.ndarray,
+     v0: np.ndarray,
+ ) -> tuple[np.ndarray, np.ndarray]:
++    """Entrywise bounds for S_ij = R_i.T V_j, equations (17)-(18)."""
++
+     length, d_key = v.shape
+     lower = np.empty((length, d_key), dtype=np.float64)
+     upper = np.empty((length, d_key), dtype=np.float64)
+diff -ruN a/src/tfe_ccp/export.py b/src/tfe_ccp/export.py
+--- a/src/tfe_ccp/export.py	2026-07-29 10:17:06.000000000 +0000
++++ b/src/tfe_ccp/export.py	2026-07-30 14:05:47.034469474 +0000
+@@ -10,6 +10,9 @@
+ from .scaling import ScalerBundle, StandardScaler
+ 
+ 
++CHECKPOINT_FORMAT_VERSION = 2
++
++
+ @dataclass(frozen=True)
+ class TFEParameters:
+     config: TFEConfig
+@@ -38,6 +41,12 @@
+ 
+ 
+ def extract_parameters(model: TransformerEncoderPredictor, scalers: ScalerBundle) -> TFEParameters:
++    """Extract matrices and vectors using the corrected paper dimensions.
++
++    In particular, ``w_l1`` has shape ``(d_key,)`` and ``b_l1`` has shape
++    ``(past_window + horizon,)``.
++    """
++
+     return TFEParameters(
+         config=model.config,
+         w_em1=_array(model.past_embedding.weight),
+@@ -79,21 +88,78 @@
+         ],
+         dtype=np.int64,
+     )
++    arrays["format_version"] = np.array([CHECKPOINT_FORMAT_VERSION], dtype=np.int64)
+     np.savez(path, **arrays)
+ 
+ 
++def _upgrade_readout_arrays(
++    w_l1: np.ndarray,
++    b_l1: np.ndarray,
++    sequence_length: int,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Upgrade arrays exported by the first starter version.
++
++    The old code used an ``nn.Linear(d_key, 1)`` readout, so W_L1 was stored as
++    ``(1, d_key)`` and b_L1 as a scalar. Repeating that scalar over all sequence
++    positions preserves the old model exactly while adopting the corrected
++    equation-(5) representation.
++    """
++
++    weight = np.asarray(w_l1, dtype=np.float64)
++    bias = np.asarray(b_l1, dtype=np.float64)
++    if weight.ndim == 2 and weight.shape[0] == 1:
++        weight = weight.reshape(-1)
++    if weight.ndim != 1:
++        raise ValueError(f"Expected w_l1 to be a vector, got shape {weight.shape}.")
++    if bias.size == 1:
++        bias = np.full(sequence_length, float(bias.reshape(-1)[0]), dtype=np.float64)
++    else:
++        bias = bias.reshape(-1)
++    if bias.shape != (sequence_length,):
++        raise ValueError(
++            f"Expected b_l1 shape ({sequence_length},), got {bias.shape}."
++        )
++    return weight, bias
++
++
+ def load_parameters(path: str | Path) -> TFEParameters:
+     data = np.load(Path(path), allow_pickle=False)
+     w, p, n_u, n_y, d = [int(value) for value in data["config_values"]]
+-    kwargs = {name: data[name] for name in data.files if name != "config_values"}
+-    return TFEParameters(config=TFEConfig(w, p, n_u, n_y, d), **kwargs)
++    config = TFEConfig(w, p, n_u, n_y, d)
++    kwargs = {
++        name: data[name]
++        for name in data.files
++        if name not in {"config_values", "format_version"}
++    }
++    kwargs["w_l1"], kwargs["b_l1"] = _upgrade_readout_arrays(
++        kwargs["w_l1"], kwargs["b_l1"], config.sequence_length
++    )
++    return TFEParameters(config=config, **kwargs)
++
++
++def _upgrade_state_dict(
++    state_dict: dict[str, torch.Tensor], config: TFEConfig
++) -> dict[str, torch.Tensor]:
++    upgraded = {key: value for key, value in state_dict.items()}
++    weight_key = "readout1.weight"
++    bias_key = "readout1.bias"
++    if weight_key in upgraded and upgraded[weight_key].ndim == 2:
++        if upgraded[weight_key].shape[0] != 1:
++            raise ValueError(
++                f"Cannot upgrade {weight_key} with shape {tuple(upgraded[weight_key].shape)}."
++            )
++        upgraded[weight_key] = upgraded[weight_key].reshape(-1)
++    if bias_key in upgraded and upgraded[bias_key].numel() == 1:
++        upgraded[bias_key] = upgraded[bias_key].reshape(1).repeat(config.sequence_length)
++    return upgraded
+ 
+ 
+ def load_checkpoint(path: str | Path) -> tuple[TransformerEncoderPredictor, ScalerBundle]:
+     checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
+     config = TFEConfig(**checkpoint["model_config"])
+     model = TransformerEncoderPredictor(config)
+-    model.load_state_dict(checkpoint["state_dict"], strict=True)
++    state_dict = _upgrade_state_dict(checkpoint["state_dict"], config)
++    model.load_state_dict(state_dict, strict=True)
+     scalers = ScalerBundle(
+         u=StandardScaler(np.asarray(checkpoint["u_mean"]), np.asarray(checkpoint["u_scale"])),
+         y=StandardScaler(np.asarray(checkpoint["y_mean"]), np.asarray(checkpoint["y_scale"])),
+diff -ruN a/src/tfe_ccp/model.py b/src/tfe_ccp/model.py
+--- a/src/tfe_ccp/model.py	2026-07-29 10:17:06.000000000 +0000
++++ b/src/tfe_ccp/model.py	2026-07-30 14:05:31.114469058 +0000
+@@ -28,16 +28,51 @@
+         return asdict(self)
+ 
+ 
++class SequenceLinearTransformation(nn.Module):
++    """Linear transformation in corrected equation (5).
++
++    For X with shape ``(..., sequence_length, d_key)``, this module computes
++
++        h = X @ W_L1 + b_L1,
++
++    with ``W_L1`` in R**d_key and a separate bias for every sequence position,
++    ``b_L1`` in R**sequence_length.
++    """
++
++    def __init__(self, d_key: int, sequence_length: int) -> None:
++        super().__init__()
++        self.d_key = d_key
++        self.sequence_length = sequence_length
++        self.weight = nn.Parameter(torch.empty(d_key))
++        self.bias = nn.Parameter(torch.empty(sequence_length))
++        self.reset_parameters()
++
++    def reset_parameters(self) -> None:
++        bound = 1.0 / math.sqrt(self.d_key)
++        nn.init.uniform_(self.weight, -bound, bound)
++        nn.init.uniform_(self.bias, -bound, bound)
++
++    def forward(self, values: Tensor) -> Tensor:
++        if values.shape[-2:] != (self.sequence_length, self.d_key):
++            raise ValueError(
++                "Expected trailing dimensions "
++                f"({self.sequence_length}, {self.d_key}), got {tuple(values.shape[-2:])}."
++            )
++        return torch.matmul(values, self.weight) + self.bias
++
++
+ class TransformerEncoderPredictor(nn.Module):
+-    """Single-head TFE with explicit layers matching the paper.
++    """Single-head TFE matching the corrected paper.
+ 
+     Shapes:
+-        past_u:  (batch, w, n_inputs)
+-        past_y:  (batch, w, n_outputs)
+-        future_u:(batch, p, n_inputs)
+-        output:  (batch, p, n_outputs)
++        past_u:   (batch, w, n_inputs)
++        past_y:   (batch, w, n_outputs)
++        future_u: (batch, p, n_inputs)
++        output:   (batch, p, n_outputs)
+ 
+     Inputs and outputs are expected to be normalized outside this module.
++    ``p`` in :meth:`intermediates` is the unscaled matrix P = Q K.T from
++    equation (7); ``logits`` is P / sqrt(d_key), the argument of softmax.
+     """
+ 
+     def __init__(self, config: TFEConfig) -> None:
+@@ -51,7 +86,7 @@
+         self.q_proj = nn.Linear(d, d)
+         self.k_proj = nn.Linear(d, d)
+         self.v_proj = nn.Linear(d, d)
+-        self.readout1 = nn.Linear(d, 1)
++        self.readout1 = SequenceLinearTransformation(d, length)
+         self.readout2 = nn.Linear(length, config.output_size)
+ 
+     def intermediates(
+@@ -74,14 +109,26 @@
+         q = self.q_proj(z1)
+         k = self.k_proj(z1)
+         v = self.v_proj(z1)
+-        p = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.config.d_key)
+-        r = torch.softmax(p, dim=-1)
++        p = torch.matmul(q, k.transpose(-1, -2))
++        logits = p / math.sqrt(self.config.d_key)
++        r = torch.softmax(logits, dim=-1)
+         s = torch.matmul(r, v)
+ 
+-        h = self.readout1(z1 + s).squeeze(-1)
++        h = self.readout1(z1 + s)
+         y_flat = self.readout2(h)
+         y = y_flat.reshape(-1, self.config.horizon, self.config.n_outputs)
+-        return {"z1": z1, "q": q, "k": k, "v": v, "p": p, "r": r, "s": s, "y": y}
++        return {
++            "z1": z1,
++            "q": q,
++            "k": k,
++            "v": v,
++            "p": p,
++            "logits": logits,
++            "r": r,
++            "s": s,
++            "h": h,
++            "y": y,
++        }
+ 
+     def forward(self, past_u: Tensor, past_y: Tensor, future_u: Tensor) -> Tensor:
+         return self.intermediates(past_u, past_y, future_u)["y"]
+diff -ruN a/src/tfe_ccp/optimization/exact_ccp.py b/src/tfe_ccp/optimization/exact_ccp.py
+--- a/src/tfe_ccp/optimization/exact_ccp.py	2026-07-29 10:17:06.000000000 +0000
++++ b/src/tfe_ccp/optimization/exact_ccp.py	2026-07-30 14:06:36.862470778 +0000
+@@ -41,13 +41,16 @@
+     return cp
+ 
+ 
+-def _simplex_vertices(cp: Any, alpha: Any, beta: Any, maximum_vertices: int) -> tuple[list[Any], Any]:
++def _simplex_vertices(
++    cp: Any, alpha: Any, beta: Any, maximum_vertices: int
++) -> tuple[list[Any], Any]:
+     alpha_flat = cp.reshape(alpha, (int(np.prod(alpha.shape)),), order="C")
+     dimension = alpha_flat.shape[0]
+     if dimension + 1 > maximum_vertices:
+         raise ValueError(
+-            f"Simplex has {dimension + 1} vertices, exceeding maximum_vertices={maximum_vertices}. "
+-            "Use smaller w/p/d_key for the exact reference implementation."
++            f"Simplex has {dimension + 1} vertices, exceeding "
++            f"maximum_vertices={maximum_vertices}. Use smaller w/p/d_key for "
++            "the exact reference implementation."
+         )
+     gamma = beta + cp.sum(alpha_flat)
+     vertices = [-alpha_flat]
+@@ -58,11 +61,18 @@
+     return vertices, gamma
+ 
+ 
+-def _stage1_bounds_cvx(cp: Any, q: Any, k: Any, q0: np.ndarray, k0: np.ndarray, d_key: int) -> tuple[list[list[Any]], list[list[Any]]]:
++def _stage1_bounds_cvx(
++    cp: Any,
++    q: Any,
++    k: Any,
++    q0: np.ndarray,
++    k0: np.ndarray,
++) -> tuple[list[list[Any]], list[list[Any]]]:
++    """Corrected equations (11)-(12) for unscaled P = Q K.T."""
++
+     length = q.shape[0]
+     lower: list[list[Any]] = [[None for _ in range(length)] for _ in range(length)]
+     upper: list[list[Any]] = [[None for _ in range(length)] for _ in range(length)]
+-    scale = math.sqrt(d_key)
+     for i in range(length):
+         for j in range(length):
+             plus = q[i, :] + k[j, :]
+@@ -73,24 +83,39 @@
+             p2 = 0.25 * cp.sum_squares(minus)
+             p1 = 0.25 * cp.sum_squares(plus)
+             p2_linear = 0.25 * float(minus0 @ minus0) + 0.5 * minus0 @ (minus - minus0)
+-            lower[i][j] = (p1_linear - p2) / scale
+-            upper[i][j] = (p1 - p2_linear) / scale
++            lower[i][j] = p1_linear - p2
++            upper[i][j] = p1 - p2_linear
+     return lower, upper
+ 
+ 
+-def _stage2_bounds_cvx(cp: Any, p: Any, p0: np.ndarray) -> tuple[list[list[Any]], list[list[Any]]]:
++def _stage2_bounds_cvx(
++    cp: Any,
++    p: Any,
++    p0: np.ndarray,
++    d_key: int,
++) -> tuple[list[list[Any]], list[list[Any]]]:
++    """Corrected equations (14)-(15) for R = softmax(P/sqrt(d_key))."""
++
++    scale = math.sqrt(d_key)
++    p_scaled = p / scale
++    p0_scaled = np.asarray(p0, dtype=np.float64) / scale
+     length = p.shape[0]
+-    r0 = softmax_rows(p0)
++    r0 = softmax_rows(p0_scaled)
+     lower: list[list[Any]] = [[None for _ in range(length)] for _ in range(length)]
+     upper: list[list[Any]] = [[None for _ in range(length)] for _ in range(length)]
+     for row in range(length):
+-        maximum = float(np.max(p0[row]))
+-        lse0 = maximum + math.log(float(np.exp(p0[row] - maximum).sum()))
+-        tangent_lse = lse0 + r0[row] @ (p[row, :] - p0[row])
+-        exp_terms = [cp.exp(p[row, column] - tangent_lse) for column in range(length)]
++        maximum = float(np.max(p0_scaled[row]))
++        lse0 = maximum + math.log(float(np.exp(p0_scaled[row] - maximum).sum()))
++        tangent_lse = lse0 + r0[row] @ (p_scaled[row, :] - p0_scaled[row])
++        exp_terms = [
++            cp.exp(p_scaled[row, column] - tangent_lse)
++            for column in range(length)
++        ]
+         for column in range(length):
+             upper[row][column] = exp_terms[column]
+-            lower[row][column] = 1.0 - cp.sum(cp.hstack([exp_terms[j] for j in range(length) if j != column]))
++            lower[row][column] = 1.0 - cp.sum(
++                cp.hstack([exp_terms[j] for j in range(length) if j != column])
++            )
+     return lower, upper
+ 
+ 
+@@ -101,6 +126,8 @@
+     r0: np.ndarray,
+     v0: np.ndarray,
+ ) -> tuple[list[list[Any]], list[list[Any]]]:
++    """Corrected entrywise equations (17)-(18) for S = R V."""
++
+     length, d_key = v.shape
+     lower: list[list[Any]] = [[None for _ in range(d_key)] for _ in range(length)]
+     upper: list[list[Any]] = [[None for _ in range(d_key)] for _ in range(length)]
+@@ -120,10 +147,11 @@
+ 
+ 
+ class ExactConicCCP:
+-    """Small-scale CVXPY reference for Algorithm 1.
++    """Small-scale CVXPY reference for corrected Algorithm 1.
+ 
+     The implementation enumerates simplex vertices exactly. Its purpose is
+-    validation and comparison, not large-horizon real-time control.
++    validation and comparison, not large-horizon real-time control. Input and
++    input-rate constraints are included as a practical extension.
+     """
+ 
+     def __init__(
+@@ -164,49 +192,95 @@
+         past_xy_n = np.concatenate((past_u_n, past_y_n), axis=1)
+         z_past = past_xy_n @ prm.w_em1.T + prm.b_em1
+         u_n = cp.multiply(u - prm.u_mean, 1.0 / prm.u_scale)
+-        z_future = u_n @ prm.w_em2.T + np.ones((cfg.horizon, 1)) @ prm.b_em2.reshape(1, -1)
++        z_future = (
++            u_n @ prm.w_em2.T
++            + np.ones((cfg.horizon, 1)) @ prm.b_em2.reshape(1, -1)
++        )
+         z1 = cp.vstack((z_past, z_future))
+         q = z1 @ prm.w_q.T + np.ones((length, 1)) @ prm.b_q.reshape(1, -1)
+         k = z1 @ prm.w_k.T + np.ones((length, 1)) @ prm.b_k.reshape(1, -1)
+         v = z1 @ prm.w_v.T + np.ones((length, 1)) @ prm.b_v.reshape(1, -1)
+ 
+         constraints: list[Any] = []
+-        lower_p, upper_p = _stage1_bounds_cvx(cp, q, k, current.q, current.k, d_key)
++        lower_p, upper_p = _stage1_bounds_cvx(cp, q, k, current.q, current.k)
+         for i in range(length):
+             for j in range(length):
+                 constraints.append(-alpha1[i, j] <= lower_p[i][j])
+-        constraints.append(cp.sum(cp.hstack([upper_p[i][j] for i in range(length) for j in range(length)])) <= beta1)
+-        p_vertices, gamma1 = _simplex_vertices(cp, alpha1, beta1, self.config.maximum_vertices)
++        constraints.append(
++            cp.sum(
++                cp.hstack(
++                    [upper_p[i][j] for i in range(length) for j in range(length)]
++                )
++            )
++            <= beta1
++        )
++        p_vertices, gamma1 = _simplex_vertices(
++            cp, alpha1, beta1, self.config.maximum_vertices
++        )
+         constraints.append(gamma1 >= 0.0)
+ 
+         for p_vertex in p_vertices:
+             p_matrix = cp.reshape(p_vertex, (length, length), order="C")
+-            lower_r, upper_r = _stage2_bounds_cvx(cp, p_matrix, current.p)
++            lower_r, upper_r = _stage2_bounds_cvx(
++                cp, p_matrix, current.p, d_key
++            )
+             for i in range(length):
+                 for j in range(length):
+                     constraints.append(-alpha2[i, j] <= lower_r[i][j])
+-            constraints.append(cp.sum(cp.hstack([upper_r[i][j] for i in range(length) for j in range(length)])) <= beta2)
+-        r_vertices, gamma2 = _simplex_vertices(cp, alpha2, beta2, self.config.maximum_vertices)
++            constraints.append(
++                cp.sum(
++                    cp.hstack(
++                        [upper_r[i][j] for i in range(length) for j in range(length)]
++                    )
++                )
++                <= beta2
++            )
++        r_vertices, gamma2 = _simplex_vertices(
++            cp, alpha2, beta2, self.config.maximum_vertices
++        )
+         constraints.append(gamma2 >= 0.0)
+ 
+         for r_vertex in r_vertices:
+             r_matrix = cp.reshape(r_vertex, (length, length), order="C")
+-            lower_s, upper_s = _stage3_bounds_cvx(cp, r_matrix, v, current.r, current.v)
++            lower_s, upper_s = _stage3_bounds_cvx(
++                cp, r_matrix, v, current.r, current.v
++            )
+             for i in range(length):
+                 for a in range(d_key):
+                     constraints.append(-alpha3[i, a] <= lower_s[i][a])
+-            constraints.append(cp.sum(cp.hstack([upper_s[i][a] for i in range(length) for a in range(d_key)])) <= beta3)
+-        s_vertices, gamma3 = _simplex_vertices(cp, alpha3, beta3, self.config.maximum_vertices)
++            constraints.append(
++                cp.sum(
++                    cp.hstack(
++                        [upper_s[i][a] for i in range(length) for a in range(d_key)]
++                    )
++                )
++                <= beta3
++            )
++        s_vertices, gamma3 = _simplex_vertices(
++            cp, alpha3, beta3, self.config.maximum_vertices
++        )
+         constraints.append(gamma3 >= 0.0)
+ 
+-        reference = np.asarray(y_reference, dtype=np.float64).reshape(cfg.horizon, cfg.n_outputs)
++        reference = np.asarray(y_reference, dtype=np.float64).reshape(
++            cfg.horizon, cfg.n_outputs
++        )
+         for s_vertex in s_vertices:
+             s_matrix = cp.reshape(s_vertex, (length, d_key), order="C")
+-            h = cp.reshape((z1 + s_matrix) @ prm.w_l1.T + np.ones((length, 1)) @ prm.b_l1.reshape(1, -1), (length,), order="C")
++            h = cp.reshape(
++                (z1 + s_matrix) @ prm.w_l1,
++                (length,),
++                order="C",
++            ) + prm.b_l1
+             y_n_flat = prm.w_l2 @ h + prm.b_l2
+-            y_n = cp.reshape(y_n_flat, (cfg.horizon, cfg.n_outputs), order="C")
++            y_n = cp.reshape(
++                y_n_flat, (cfg.horizon, cfg.n_outputs), order="C"
++            )
+             y_physical = cp.multiply(y_n, prm.y_scale) + prm.y_mean
+-            constraints.append(self.config.tracking_weight * cp.sum_squares(y_physical - reference) <= worst_tracking)
++            constraints.append(
++                self.config.tracking_weight
++                * cp.sum_squares(y_physical - reference)
++                <= worst_tracking
++            )
+ 
+         u_flat = cp.reshape(u, (cfg.horizon * cfg.n_inputs,), order="C")
+         d = difference_matrix(cfg.horizon, cfg.n_inputs)
+@@ -220,11 +294,19 @@
+                 delta <= np.tile(np.asarray(self.bounds.du_max), cfg.horizon),
+             ]
+         )
+-        objective = cp.Minimize(worst_tracking + self.config.control_weight * cp.sum_squares(delta))
++        objective = cp.Minimize(
++            worst_tracking + self.config.control_weight * cp.sum_squares(delta)
++        )
+         problem = cp.Problem(objective, constraints)
+-        problem.solve(solver=self.config.solver, verbose=self.config.verbose, warm_start=True)
++        problem.solve(
++            solver=self.config.solver,
++            verbose=self.config.verbose,
++            warm_start=True,
++        )
+         if u.value is None:
+-            raise RuntimeError(f"Exact conic CCP subproblem failed with status {problem.status}")
++            raise RuntimeError(
++                f"Exact conic CCP subproblem failed with status {problem.status}"
++            )
+         return np.asarray(u.value), float(problem.value), str(problem.status)
+ 
+     def solve(
+diff -ruN a/src/tfe_ccp/training.py b/src/tfe_ccp/training.py
+--- a/src/tfe_ccp/training.py	2026-07-29 10:17:06.000000000 +0000
++++ b/src/tfe_ccp/training.py	2026-07-30 14:05:50.966469577 +0000
+@@ -109,6 +109,7 @@
+     path.parent.mkdir(parents=True, exist_ok=True)
+     torch.save(
+         {
++            "checkpoint_format_version": 2,
+             "model_config": model.config.to_dict(),
+             "state_dict": model.state_dict(),
+             "u_mean": scalers.u.mean,
+diff -ruN a/tests/test_data_system.py b/tests/test_data_system.py
+--- a/tests/test_data_system.py	2026-07-29 10:17:06.000000000 +0000
++++ b/tests/test_data_system.py	2026-07-30 14:07:03.582471478 +0000
+@@ -9,6 +9,6 @@
+     controls = piecewise_constant_controls(30, 1, -1.0, 1.0, hold=3, seed=2)
+     trajectory = simulate(system, controls)
+     windows = make_windows(trajectory, past_window=4, horizon=5)
+-    assert windows.past_u.shape == (21, 4, 1)
+-    assert windows.future_u.shape == (21, 5, 1)
++    assert windows.past_u.shape == (22, 4, 1)
++    assert windows.future_u.shape == (22, 5, 1)
+     assert np.isfinite(windows.target_y).all()
+diff -ruN a/tests/test_dc_bounds.py b/tests/test_dc_bounds.py
+--- a/tests/test_dc_bounds.py	2026-07-29 10:17:06.000000000 +0000
++++ b/tests/test_dc_bounds.py	2026-07-30 14:07:03.122471466 +0000
+@@ -7,26 +7,31 @@
+     rng = np.random.default_rng(4)
+     length, d_key = 4, 3
+     q0, k0 = rng.normal(size=(length, d_key)), rng.normal(size=(length, d_key))
+-    q, k = q0 + 0.2 * rng.normal(size=(length, d_key)), k0 + 0.2 * rng.normal(size=(length, d_key))
+-    lower_p, upper_p = stage1_bounds(q, k, q0, k0, d_key)
+-    true_p = q @ k.T / np.sqrt(d_key)
++    q = q0 + 0.2 * rng.normal(size=(length, d_key))
++    k = k0 + 0.2 * rng.normal(size=(length, d_key))
++
++    # Corrected paper: P = Q K.T is unscaled in stage 1.
++    lower_p, upper_p = stage1_bounds(q, k, q0, k0)
++    true_p = q @ k.T
+     assert np.all(lower_p <= true_p + 1e-10)
+     assert np.all(true_p <= upper_p + 1e-10)
+-    tight_l, tight_u = stage1_bounds(q0, k0, q0, k0, d_key)
+-    np.testing.assert_allclose(tight_l, q0 @ k0.T / np.sqrt(d_key), atol=1e-12)
+-    np.testing.assert_allclose(tight_u, q0 @ k0.T / np.sqrt(d_key), atol=1e-12)
++    tight_l, tight_u = stage1_bounds(q0, k0, q0, k0)
++    np.testing.assert_allclose(tight_l, q0 @ k0.T, atol=1e-12)
++    np.testing.assert_allclose(tight_u, q0 @ k0.T, atol=1e-12)
+ 
+-    p0 = q0 @ k0.T / np.sqrt(d_key)
++    # Corrected paper: softmax applies the 1/sqrt(d_key) scaling in stage 2.
++    p0 = q0 @ k0.T
+     p = true_p
+-    lower_r, upper_r = stage2_bounds(p, p0)
+-    true_r = softmax_rows(p)
++    lower_r, upper_r = stage2_bounds(p, p0, d_key)
++    true_r = softmax_rows(p / np.sqrt(d_key))
+     assert np.all(lower_r <= true_r + 1e-10)
+     assert np.all(true_r <= upper_r + 1e-10)
+-    tight_l, tight_u = stage2_bounds(p0, p0)
+-    np.testing.assert_allclose(tight_l, softmax_rows(p0), atol=1e-12)
+-    np.testing.assert_allclose(tight_u, softmax_rows(p0), atol=1e-12)
++    tight_l, tight_u = stage2_bounds(p0, p0, d_key)
++    expected_r0 = softmax_rows(p0 / np.sqrt(d_key))
++    np.testing.assert_allclose(tight_l, expected_r0, atol=1e-12)
++    np.testing.assert_allclose(tight_u, expected_r0, atol=1e-12)
+ 
+-    r0, r = softmax_rows(p0), true_r
++    r0, r = expected_r0, true_r
+     v0 = rng.normal(size=(length, d_key))
+     v = v0 + 0.2 * rng.normal(size=(length, d_key))
+     lower_s, upper_s = stage3_bounds(r, v, r0, v0)
+diff -ruN a/tests/test_model_export.py b/tests/test_model_export.py
+--- a/tests/test_model_export.py	2026-07-29 10:17:06.000000000 +0000
++++ b/tests/test_model_export.py	2026-07-30 14:07:03.694471481 +0000
+@@ -1,18 +1,32 @@
++from pathlib import Path
++
+ import numpy as np
+ import torch
+ 
+ from tfe_ccp.dc_bounds import forward_from_parameters
+-from tfe_ccp.export import extract_parameters
++from tfe_ccp.export import extract_parameters, load_checkpoint
+ from tfe_ccp.model import TFEConfig, TransformerEncoderPredictor
+ from tfe_ccp.scaling import ScalerBundle, StandardScaler
+ 
+ 
+-def test_exported_forward_matches_torch() -> None:
++def _scalers() -> ScalerBundle:
++    return ScalerBundle(
++        StandardScaler(np.array([0.2]), np.array([1.3])),
++        StandardScaler(np.array([-0.4]), np.array([0.7])),
++    )
++
++
++def test_exported_forward_matches_torch_and_corrected_dimensions() -> None:
+     torch.manual_seed(2)
+     config = TFEConfig(past_window=3, horizon=2, n_inputs=1, n_outputs=1, d_key=2)
+     model = TransformerEncoderPredictor(config).eval()
+-    scalers = ScalerBundle(StandardScaler(np.array([0.2]), np.array([1.3])), StandardScaler(np.array([-0.4]), np.array([0.7])))
++    scalers = _scalers()
+     params = extract_parameters(model, scalers)
++
++    assert params.w_l1.shape == (config.d_key,)
++    assert params.b_l1.shape == (config.sequence_length,)
++    assert params.w_l2.shape == (config.output_size, config.sequence_length)
++
+     past_u = np.array([[0.1], [0.2], [0.3]])
+     past_y = np.array([[1.0], [0.8], [0.6]])
+     future_u = np.array([[0.4], [0.5]])
+@@ -21,7 +35,74 @@
+         pu = torch.tensor(scalers.u.transform(past_u), dtype=torch.float32)[None]
+         py = torch.tensor(scalers.y.transform(past_y), dtype=torch.float32)[None]
+         fu = torch.tensor(scalers.u.transform(future_u), dtype=torch.float32)[None]
+-        expected_n = model(pu, py, fu).numpy()[0]
++        torch_values = model.intermediates(pu, py, fu)
++        expected_n = torch_values["y"].numpy()[0]
+     expected = scalers.y.inverse_transform(expected_n)
+-    actual = forward_from_parameters(params, past_u, past_y, future_u).y
+-    np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
++    actual_values = forward_from_parameters(params, past_u, past_y, future_u)
++    np.testing.assert_allclose(actual_values.y, expected, rtol=2e-6, atol=2e-6)
++
++    # P is unscaled; logits carry the 1/sqrt(d_key) factor.
++    np.testing.assert_allclose(
++        actual_values.p,
++        actual_values.q @ actual_values.k.T,
++        rtol=2e-12,
++        atol=2e-12,
++    )
++    np.testing.assert_allclose(
++        actual_values.logits,
++        actual_values.p / np.sqrt(config.d_key),
++        rtol=2e-12,
++        atol=2e-12,
++    )
++    np.testing.assert_allclose(
++        actual_values.h,
++        (actual_values.z1 + actual_values.s) @ params.w_l1 + params.b_l1,
++        rtol=2e-12,
++        atol=2e-12,
++    )
++
++
++def test_version_01_checkpoint_is_upgraded_without_changing_prediction(tmp_path: Path) -> None:
++    torch.manual_seed(7)
++    config = TFEConfig(past_window=2, horizon=2, d_key=3)
++    model = TransformerEncoderPredictor(config).eval()
++    scalers = _scalers()
++
++    # Version 0.1 used one shared scalar b_L1. Make the corrected model use the
++    # same scalar at every position, then serialize the old tensor shapes.
++    with torch.no_grad():
++        model.readout1.bias.fill_(0.125)
++    old_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
++    old_state["readout1.weight"] = old_state["readout1.weight"].reshape(1, -1)
++    old_state["readout1.bias"] = old_state["readout1.bias"][:1]
++
++    checkpoint = tmp_path / "old_model.pt"
++    torch.save(
++        {
++            "model_config": config.to_dict(),
++            "state_dict": old_state,
++            "u_mean": scalers.u.mean,
++            "u_scale": scalers.u.scale,
++            "y_mean": scalers.y.mean,
++            "y_scale": scalers.y.scale,
++        },
++        checkpoint,
++    )
++    loaded, _ = load_checkpoint(checkpoint)
++    assert loaded.readout1.weight.shape == (config.d_key,)
++    assert loaded.readout1.bias.shape == (config.sequence_length,)
++    np.testing.assert_allclose(
++        loaded.readout1.bias.detach().numpy(),
++        np.full(config.sequence_length, 0.125),
++    )
++
++    past_u = torch.zeros((1, config.past_window, config.n_inputs))
++    past_y = torch.zeros((1, config.past_window, config.n_outputs))
++    future_u = torch.zeros((1, config.horizon, config.n_inputs))
++    with torch.no_grad():
++        np.testing.assert_allclose(
++            loaded(past_u, past_y, future_u).numpy(),
++            model(past_u, past_y, future_u).numpy(),
++            rtol=1e-7,
++            atol=1e-7,
++        )

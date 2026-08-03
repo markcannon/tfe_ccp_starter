@@ -1,0 +1,11 @@
+numpy>=1.26
+scipy>=1.11
+torch>=2.2
+
+[dev]
+pytest>=8
+
+[optimization]
+cvxpy>=1.6
+clarabel>=0.10
+piqp>=0.6
