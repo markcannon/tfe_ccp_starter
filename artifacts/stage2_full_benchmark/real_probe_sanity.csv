@@ -1,0 +1,16 @@
+iteration,solver_status,objective,p0_inside_new_box,p0_box_max_violation,p_optimized_inside_box,p_optimized_box_max_violation,p_optimized_inside_simplex,p_optimized_simplex_lower_max_violation,p_optimized_simplex_sum_violation
+0,optimal_inaccurate,1.9967137888081483,False,0.006382078352667811,True,0.0,True,0.0,0.0
+1,optimal_inaccurate,1.9959348519520221,False,0.004296119785733715,True,0.0,True,0.0,0.0
+2,optimal_inaccurate,1.9955293558729723,False,0.0030685058838825496,True,0.0,True,0.0,0.0
+3,optimal_inaccurate,1.995307056520615,False,0.0022385771772795854,True,0.0,True,0.0,0.0
+4,optimal_inaccurate,1.9951856635134977,False,0.001651068625361976,True,0.0,True,0.0,0.0
+5,optimal_inaccurate,1.995133650615117,False,0.001463061557071474,True,0.0,True,0.0,0.0
+6,optimal_inaccurate,1.9950760725456853,False,0.0008561408873430931,True,0.0,True,0.0,0.0
+7,optimal_inaccurate,1.9950588027970855,False,0.0006658437753909452,True,0.0,True,0.0,0.0
+8,optimal_inaccurate,1.995049106473902,False,0.0005054081732728533,True,0.0,True,0.0,0.0
+9,optimal_inaccurate,1.9950444152791362,False,0.000436774880791968,True,0.0,True,0.0,0.0
+10,optimal_inaccurate,1.9950406156639207,False,0.0002865855316826066,True,0.0,True,0.0,0.0
+11,optimal_inaccurate,1.9950399696640213,False,0.00021396705362963786,True,0.0,True,0.0,0.0
+12,optimal_inaccurate,1.9950386499757677,False,0.0001236872565574948,True,0.0,True,0.0,0.0
+13,optimal_inaccurate,1.9950379374977416,False,5.910943655397516e-05,True,0.0,True,0.0,0.0
+14,optimal_inaccurate,1.9950405032860747,False,2.0188534400847336e-05,True,0.0,True,0.0,0.0

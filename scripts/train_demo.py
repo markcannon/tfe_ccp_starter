@@ -57,8 +57,7 @@ def main() -> None:
     save_checkpoint(args.output, model, scalers, history)
     save_parameters(args.output.with_suffix(".npz"), extract_parameters(model, scalers))
     print(f"Saved checkpoint to {args.output}")
-    print(f"Final validation MSE: {history['validation'][-1]:.6g}")
-
+    print(f"Best validation MSE: {min(history['validation']):.6g}")
 
 if __name__ == "__main__":
     main()

@@ -30,6 +30,15 @@ class ExactCCPResult:
     status_history: list[str]
 
 
+@dataclass(frozen=True)
+class ExactSubproblemStats:
+    solver_internal_time_seconds: float
+    solver_num_iters: int
+    num_scalar_variables: int
+    num_scalar_eq_constraints: int
+    num_scalar_leq_constraints: int
+
+
 def _require_cvxpy() -> Any:
     try:
         import cvxpy as cp
@@ -163,6 +172,7 @@ class ExactConicCCP:
         self.parameters = parameters
         self.bounds = bounds
         self.config = config
+        self.last_subproblem_stats: ExactSubproblemStats | None = None
 
     def _one_iteration(
         self,
@@ -298,10 +308,23 @@ class ExactConicCCP:
             worst_tracking + self.config.control_weight * cp.sum_squares(delta)
         )
         problem = cp.Problem(objective, constraints)
+        size_metrics = problem.size_metrics
         problem.solve(
             solver=self.config.solver,
             verbose=self.config.verbose,
             warm_start=True,
+        )
+        solver_stats = problem.solver_stats
+        solver_internal_time = getattr(solver_stats, "solve_time", None)
+        solver_num_iters = getattr(solver_stats, "num_iters", None)
+        self.last_subproblem_stats = ExactSubproblemStats(
+            solver_internal_time_seconds=(
+                float(solver_internal_time) if solver_internal_time is not None else float("nan")
+            ),
+            solver_num_iters=int(solver_num_iters) if solver_num_iters is not None else -1,
+            num_scalar_variables=int(size_metrics.num_scalar_variables),
+            num_scalar_eq_constraints=int(size_metrics.num_scalar_eq_constr),
+            num_scalar_leq_constraints=int(size_metrics.num_scalar_leq_constr),
         )
         if u.value is None:
             raise RuntimeError(

@@ -1,0 +1,2 @@
+operating_history_source,history_length,history_seed,history_control_low,history_control_high,history_hold,common_current_output,common_previous_input,reference_mode,reference_step,reference_value,u_min,u_max,du_min,du_max,max_iterations,tolerance,repeats,exact_vertex_limit,fixed_L,tested_dkeys,exact_max_dkey
+"deterministic CoupledTanks simulation (benchmark condition, not training data)",64,1,0.0,10.0,8,[9.071828329890721],[4.091991363691613],current_output_plus_step,1.0,[10.071828329890721],0.0,10.0,-2.0,2.0,20,0.0001,3,200,8,"[2, 4, 8, 16]",4

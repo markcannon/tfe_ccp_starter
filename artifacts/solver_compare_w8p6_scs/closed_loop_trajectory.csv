@@ -1,0 +1,2 @@
+step,measured_output,reference,tracking_error,applied_input,predicted_first_output,true_rollout_first_output,first_output_prediction_error,previous_input
+0,9.009980804978904,9.0,0.009980804978903635,4.907866709770699,8.889504072384819,9.009980804978904,-0.12047673259408498,4.091991363691613
